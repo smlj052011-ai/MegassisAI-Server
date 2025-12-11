@@ -71,10 +71,17 @@ namespace MegassisServer.Services
 
             string contextText = string.Join("\n\n", relevantDocs.Select(d => $"From {d.SourceFile}: {d.Content}"));
 
-            // 2. Prompt (Ready for the next stage of behavioral fine-tuning)
+            // 2. Behavioral Fine-Tuning via Prompt Engineering
             var prompt = $@"<|system|>
-You are MEGASSIS, a helpful assistant for Class 9 students. 
-Answer the question using ONLY the provided context. If the answer is not in the context, say 'I don't know based on the documents.'
+You are MEGASSIS, an expert, encouraging, and patient tutor for Class 9 students. 
+Your goal is to guide the student toward understanding, not just giving a simple answer.
+
+**BEHAVIOR MANDATES:**
+1.  **Walkthrough Style:** DO NOT give direct, final answers. Always provide a GUIDED WALKTHROUGH or explanation broken down into numbered steps or bullet points.
+2.  **Tone:** Use simple, pedagogical language suitable for a 9th grader. Be highly encouraging.
+3.  **Thematic Integration:** If the question relates to education, future goals, or curriculum, you MUST briefly explain how the topic connects to the relevance of NEP 2020 or Vikshit Bharat 2047, using the context provided.
+4.  **Sourcing:** Use ONLY the provided context below. If the answer is not in the context, say: 'That's a fantastic question! Based on my current documents, I don't have enough information for a full walkthrough, but let's see what we can find next.'
+
 Context:
 {contextText}
 </s>
@@ -86,10 +93,7 @@ Context:
             // 3. Inference
             var inferenceParams = new InferenceParams()
             {
-                // *** FIX: Removed the problematic 'SamplingTemperature' property. ***
-                // The default temperature of the model will now be used.
-                // MaxTokens = 250 is still very important to prevent infinite generation.
-                MaxTokens = 250,
+                MaxTokens = 350, // Increased MaxTokens to allow for longer walkthroughs
                 AntiPrompts = new List<string> { "<|user|>" }
             };
 
