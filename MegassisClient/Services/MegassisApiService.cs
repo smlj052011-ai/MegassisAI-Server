@@ -14,7 +14,7 @@ namespace MegassisClient.Services
         // REPLACE THIS URL with the actual Codespace Public URL after deployment.
         // It will look something like: https://your-username-megassisa-xxxx.github.dev/api/chat
         // During local testing, you can use: http://10.0.2.2:5000/api/chat
-        private const string BaseUrl = "YOUR_CODE_SPACE_PUBLIC_URL_HERE";
+        private const string BaseUrl = "https://reimagined-space-adventure-x57pq5v95wggc99jv-5087.app.github.dev/api/Chat";
         private readonly HttpClient _httpClient;
 
         public MegassisApiService()
