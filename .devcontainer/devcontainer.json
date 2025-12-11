@@ -1,0 +1,34 @@
+{
+    "name": "ASP.NET Core LLM Server",
+    "image": "mcr.microsoft.com/devcontainers/universal:latest",
+    
+    // Install the .NET SDK
+    "features": {
+        "ghcr.io/devcontainers/features/dotnet:2": {}
+    },
+
+    // When the Codespace starts, restore packages in the MegassisServer folder
+    "postCreateCommand": "cd MegassisServer && dotnet restore",
+
+    // This ensures your API server port (5000) is recognized and can be made public
+    "appPort": 5000,
+    "portsAttributes": {
+        "5000": {
+            "label": "Megassis API",
+            "onAutoForward": "notify",
+            "protocol": "http"
+        }
+    },
+
+    // Extensions and VS Code customizations
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "bash"
+            },
+            "extensions": [
+                "ms-dotnettools.csdevkit"
+            ]
+        }
+    }
+}

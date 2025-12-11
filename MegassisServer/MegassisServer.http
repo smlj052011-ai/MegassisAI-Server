@@ -1,0 +1,6 @@
+@MegassisServer_HostAddress = http://localhost:5087
+
+GET {{MegassisServer_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

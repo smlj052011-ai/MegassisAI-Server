@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="MegassisClient/MegassisClient.csproj" Id="41b358b7-77ba-41f3-a295-6ee50c578ba4" />
+  <Project Path="MegassisDataChunker/MegassisDataProcessor.csproj" />
+  <Project Path="MegassisServer/MegassisServer.csproj" Id="9f361494-e764-4f16-ba31-c703970b86b0" />
+</Solution>

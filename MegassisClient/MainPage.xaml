@@ -1,0 +1,39 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="MegassisClient.MainPage"
+             BackgroundColor="#121212">
+
+    <Grid RowDefinitions="*, Auto" Padding="15">
+
+        <!-- Chat Area -->
+        <CollectionView x:Name="ChatList" Grid.Row="0" Margin="0,0,0,10">
+            <CollectionView.ItemTemplate>
+                <DataTemplate>
+                    <VerticalStackLayout Padding="10" 
+                                         HorizontalOptions="{Binding Alignment}"
+                                         BackgroundColor="{Binding BoxColor}"
+                                         Spacing="5">
+                        <Label Text="{Binding Text}" TextColor="White" LineBreakMode="WordWrap"/>
+                    </VerticalStackLayout>
+                </DataTemplate>
+            </CollectionView.ItemTemplate>
+        </CollectionView>
+
+        <!-- Input Area -->
+        <HorizontalStackLayout Grid.Row="1" Spacing="10" HorizontalOptions="Center">
+            <Entry x:Name="QuestionEntry" 
+                   Placeholder="Ask MEGASSIS..." 
+                   PlaceholderColor="Gray"
+                   TextColor="White"
+                   WidthRequest="250"
+                   BackgroundColor="#2d2d2d"/>
+
+            <Button Text="Send" 
+                    Clicked="OnSendClicked" 
+                    BackgroundColor="#6200EE" 
+                    TextColor="White"/>
+        </HorizontalStackLayout>
+    </Grid>
+
+</ContentPage>
