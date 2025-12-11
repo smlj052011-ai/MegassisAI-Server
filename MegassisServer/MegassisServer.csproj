@@ -7,12 +7,11 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Remove="Models\tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Content Include="Models\tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf">
-      <CopyToOutputDirectory>Copy if newer.</CopyToOutputDirectory>
+    <Content Update="Models\**">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Update="Data\**">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 
