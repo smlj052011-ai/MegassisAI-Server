@@ -15,13 +15,17 @@ namespace MegassisServer.Services
         private readonly IReadOnlyList<KnowledgeChunk> _knowledgeChunks;
         private readonly string _systemPrompt;
         private readonly string _retrievalPromptTemplate;
-        // INCREASED CONTEXT SIZE: Doubling to 4096 to mitigate the 'NoKvSlot' error.
-        private readonly int _contextSize = 4096;
+
+        // Context configuration
+        private readonly int _contextSize = 4096; // Increased to mitigate NoKvSlot error
+        // Hard limit on the RAG context size to prevent exceeding the 4096 token limit.
+        private readonly int _maxRAGContextChars = 1500;
 
         public MegassisBrainService()
         {
             // --- Model and Prompt Configuration ---
 
+            // FIX: Reverted to use AppContext.BaseDirectory for correct path resolution
             _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
             _knowledgePath = Path.Combine(AppContext.BaseDirectory, "Data", "megassis_knowledge.json");
 
@@ -82,7 +86,25 @@ namespace MegassisServer.Services
                 string finalPrompt;
                 if (relevantChunks.Any())
                 {
-                    var contextText = string.Join("\n---\n", relevantChunks.Select(c => c.Content));
+                    var contextBuilder = new StringBuilder();
+                    foreach (var chunk in relevantChunks)
+                    {
+                        // Check if adding the next chunk would exceed the character limit
+                        if (contextBuilder.Length + chunk.Content.Length + 50 > _maxRAGContextChars)
+                        {
+                            break; // Stop adding chunks
+                        }
+                        contextBuilder.AppendLine(chunk.Content);
+                        contextBuilder.AppendLine("---");
+                    }
+
+                    // Ensure the context text is truncated if it's still too long after the loop
+                    string contextText = contextBuilder.ToString().Trim();
+                    if (contextText.Length > _maxRAGContextChars)
+                    {
+                        contextText = contextText.Substring(0, _maxRAGContextChars) + "... [TRUNCATED]";
+                    }
+
                     finalPrompt = string.Format(_retrievalPromptTemplate, contextText, userQuestion);
                 }
                 else
@@ -108,7 +130,8 @@ namespace MegassisServer.Services
             {
                 // Explicitly log the LLamaDecodeError
                 Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                return "I ran into a temporary memory limitation (NoKvSlot error) during processing. The context size has been increased, but please try your question again or simplify it.";
+                // Provide a specific message to the user confirming the context limit was hit
+                return "I ran into a context memory limitation (NoKvSlot error) during processing, even with the expanded context. Please try simplifying or shortening your question significantly.";
             }
             catch (Exception ex)
             {
