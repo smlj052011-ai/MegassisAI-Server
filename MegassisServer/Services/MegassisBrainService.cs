@@ -1,7 +1,7 @@
 ﻿using LLama;
 using LLama.Abstractions;
 using LLama.Common;
-using LLama.Exceptions; // <--- ADDED EXPLICITLY
+using LLama.Exceptions;
 using System.Text.Json;
 using System.Text;
 
@@ -14,21 +14,16 @@ namespace MegassisServer.Services
         private readonly string _knowledgePath;
         private readonly IReadOnlyList<KnowledgeChunk> _knowledgeChunks;
         private readonly string _systemPrompt;
-        private readonly string _retrievalPromptTemplate;
 
         // Context configuration
-        // NOTE: Logs show the model is only using n_ctx = 2048, ignoring this 4096 setting.
         private readonly int _contextSize = 4096;
-
-        // AGGRESSIVE REDUCTION: We are limiting the RAG context to a very small size (approx 125 tokens) 
-        // to ensure the total prompt fits well within the 2048 limit the model is actually using.
+        // AGGRESSIVE LIMIT: Hard cap on RAG context due to the model being limited to 2048 tokens.
         private readonly int _maxRAGContextChars = 500;
 
         public MegassisBrainService()
         {
             // --- Model and Prompt Configuration ---
 
-            // FIX: Using AppContext.BaseDirectory for correct path resolution
             _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
             _knowledgePath = Path.Combine(AppContext.BaseDirectory, "Data", "megassis_knowledge.json");
 
@@ -44,11 +39,8 @@ namespace MegassisServer.Services
                 _knowledgeChunks = new List<KnowledgeChunk>(); // Initialize empty list on failure
             }
 
-            // System Prompt defining the AI's role and RAG instruction
-            _systemPrompt = "You are Megassis, a friendly, helpful, and concise AI assistant. Your goal is to provide accurate answers based on the context provided. If the context does not contain the answer, state that you do not have information on that topic, and suggest searching the web. Do not make up answers.";
-
-            // Template for injecting retrieved context into the prompt
-            _retrievalPromptTemplate = "Based *only* on the following context, answer the question. If the context is irrelevant or insufficient, politely state that you cannot answer the question based on the provided data.\n\nContext:\n{0}\n\nQuestion: {1}";
+            // MODIFIED SYSTEM PROMPT: Now includes the RAG instruction to save prompt template tokens.
+            _systemPrompt = "You are Megassis, a friendly, helpful, and concise AI assistant. ALWAYS base your response strictly on the provided context, which is prefixed with 'CONTEXT: '. If the context does not contain the answer, state that you do not have information on that topic. Do not make up answers.";
         }
 
         public async Task<string> AskMegassis(string userQuestion)
@@ -86,40 +78,38 @@ namespace MegassisServer.Services
                 // 2. Retrieval Augmented Generation (RAG)
                 var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 2);
 
-                string finalPrompt;
+                string finalUserQuery;
                 if (relevantChunks.Any())
                 {
                     var contextBuilder = new StringBuilder();
                     foreach (var chunk in relevantChunks)
                     {
-                        // Check if adding the next chunk would exceed the character limit
-                        // Note: Using a stricter check with 50 character buffer.
                         if (contextBuilder.Length + chunk.Content.Length + 50 > _maxRAGContextChars)
                         {
-                            break; // Stop adding chunks
+                            break;
                         }
                         contextBuilder.AppendLine(chunk.Content);
                         contextBuilder.AppendLine("---");
                     }
 
-                    // Ensure the context text is truncated if it's still too long after the loop
                     string contextText = contextBuilder.ToString().Trim();
                     if (contextText.Length > _maxRAGContextChars)
                     {
                         contextText = contextText.Substring(0, _maxRAGContextChars) + "... [TRUNCATED]";
                     }
 
-                    finalPrompt = string.Format(_retrievalPromptTemplate, contextText, userQuestion);
+                    // PROMPT OPTIMIZATION: Inject RAG context directly before the user question
+                    finalUserQuery = $"CONTEXT: {contextText}\n\nUSER QUESTION: {userQuestion}";
                 }
                 else
                 {
                     // No relevant context found, ask the question directly
-                    finalPrompt = userQuestion;
+                    finalUserQuery = userQuestion;
                 }
 
                 // 3. Manually format full prompt (TinyLlama Chat template)
-                // <|system|>system prompt<|end|>\n<|user|>user query<|end|>\n<|assistant|>
-                var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalPrompt}<|end|>\n<|assistant|>";
+                // Use the streamlined finalUserQuery
+                var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
 
                 // 4. Run the inference
                 var result = new StringBuilder();
@@ -132,10 +122,8 @@ namespace MegassisServer.Services
             }
             catch (LLamaDecodeError ex)
             {
-                // Catch the specific error now that the namespace is included
                 Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                // Provide a specific message to the user confirming the context limit was hit
-                return "I ran into a context memory limitation (NoKvSlot error). This is likely due to the model's small, fixed context size (2048 tokens). Please try simplifying or shortening your question significantly.";
+                return "I ran into a persistent context memory limitation (NoKvSlot error). This TinyLlama model seems to have a fixed, small context size (2048 tokens). Please try simplifying or shortening your question significantly.";
             }
             catch (Exception ex)
             {
