@@ -1,8 +1,9 @@
 ﻿using LLama;
 using LLama.Abstractions;
 using LLama.Common;
-using System.Text.Json;
+using LLama.Exceptions;
 using System.Text;
+using System.Text.Json;
 
 namespace MegassisServer.Services
 {
@@ -14,7 +15,8 @@ namespace MegassisServer.Services
         private readonly IReadOnlyList<KnowledgeChunk> _knowledgeChunks;
         private readonly string _systemPrompt;
         private readonly string _retrievalPromptTemplate;
-        private readonly int _contextSize = 2048; // Based on TinyLlama spec
+        // INCREASED CONTEXT SIZE: Doubling to 4096 to mitigate the 'NoKvSlot' error.
+        private readonly int _contextSize = 4096;
 
         public MegassisBrainService()
         {
@@ -49,25 +51,22 @@ namespace MegassisServer.Services
 
             try
             {
-                // --- 1. CRITICAL FIX: Load Weights and Create Context/Executor on every call ---
-                // This guarantees a clean KV cache and fixes the 'NoKvSlot' error.
+                // --- 1. Load Weights and Create Context/Executor on every call ---
 
-                // Define Model/Context Parameters (Using ModelParams, as ContextParams seems missing in your LLamaSharp version)
-                // The model path is often required in the ModelParams constructor in older versions.
+                // Define Model/Context Parameters 
                 var modelParams = new LLama.Common.ModelParams(_modelPath)
                 {
                     ContextSize = (uint)_contextSize,
                     MainGpu = 0 // Use CPU/main GPU
                 };
 
-                // Load Model Weights (resource) - Replacing LLamaModelLoader with static LoadFromFile
+                // Load Model Weights (resource)
                 weights = LLamaWeights.LoadFromFile(modelParams);
 
-                // Create Context (memory/KV cache). Note: ModelParams implements IContextParams.
+                // Create Context (memory/KV cache)
                 context = weights.CreateContext(modelParams);
 
                 // Create Executor
-                // Note: The StatelessExecutor requires an IContextParams, which ModelParams implements.
                 var executor = new StatelessExecutor(weights, modelParams);
 
                 // Define Inference Parameters (using the simplest version)
@@ -105,30 +104,29 @@ namespace MegassisServer.Services
 
                 return result.ToString().Trim();
             }
+            catch (LLamaDecodeError ex)
+            {
+                // Explicitly log the LLamaDecodeError
+                Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
+                return "I ran into a temporary memory limitation (NoKvSlot error) during processing. The context size has been increased, but please try your question again or simplify it.";
+            }
             catch (Exception ex)
             {
-                // Log the exception details
+                // Log all other exceptions
                 Console.WriteLine($"[ERROR] Unhandled exception in AskMegassis: {ex.GetType().Name}: {ex.Message}");
                 Console.WriteLine(ex.ToString());
-
-                // Check for the specific NoKvSlot error in the message if possible
-                if (ex.Message.Contains("NoKvSlot") || ex.Message.Contains("llama_decode failed"))
-                {
-                    return "I ran into a temporary memory limitation during processing. Please try your question again.";
-                }
 
                 return "A server error occurred while trying to generate the response. Please check the server console for details.";
             }
             finally
             {
                 // 5. CRITICAL STEP: Dispose resources in the finally block
-                // This ensures memory is freed even if an error occurs.
                 context?.Dispose();
                 weights?.Dispose();
             }
         }
 
-        // --- KnowledgeChunk definition included here to fix CS0234 ---
+        // --- KnowledgeChunk definition ---
         public class KnowledgeChunk
         {
             public string Id { get; set; } = Guid.NewGuid().ToString();
