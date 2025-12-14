@@ -1,9 +1,9 @@
 ﻿using LLama;
 using LLama.Abstractions;
 using LLama.Common;
-using LLama.Exceptions;
-using System.Text;
+using LLama.Exceptions; // <--- ADDED EXPLICITLY
 using System.Text.Json;
+using System.Text;
 
 namespace MegassisServer.Services
 {
@@ -17,15 +17,18 @@ namespace MegassisServer.Services
         private readonly string _retrievalPromptTemplate;
 
         // Context configuration
-        private readonly int _contextSize = 4096; // Increased to mitigate NoKvSlot error
-        // Hard limit on the RAG context size to prevent exceeding the 4096 token limit.
-        private readonly int _maxRAGContextChars = 1500;
+        // NOTE: Logs show the model is only using n_ctx = 2048, ignoring this 4096 setting.
+        private readonly int _contextSize = 4096;
+
+        // AGGRESSIVE REDUCTION: We are limiting the RAG context to a very small size (approx 125 tokens) 
+        // to ensure the total prompt fits well within the 2048 limit the model is actually using.
+        private readonly int _maxRAGContextChars = 500;
 
         public MegassisBrainService()
         {
             // --- Model and Prompt Configuration ---
 
-            // FIX: Reverted to use AppContext.BaseDirectory for correct path resolution
+            // FIX: Using AppContext.BaseDirectory for correct path resolution
             _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
             _knowledgePath = Path.Combine(AppContext.BaseDirectory, "Data", "megassis_knowledge.json");
 
@@ -90,6 +93,7 @@ namespace MegassisServer.Services
                     foreach (var chunk in relevantChunks)
                     {
                         // Check if adding the next chunk would exceed the character limit
+                        // Note: Using a stricter check with 50 character buffer.
                         if (contextBuilder.Length + chunk.Content.Length + 50 > _maxRAGContextChars)
                         {
                             break; // Stop adding chunks
@@ -128,10 +132,10 @@ namespace MegassisServer.Services
             }
             catch (LLamaDecodeError ex)
             {
-                // Explicitly log the LLamaDecodeError
+                // Catch the specific error now that the namespace is included
                 Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
                 // Provide a specific message to the user confirming the context limit was hit
-                return "I ran into a context memory limitation (NoKvSlot error) during processing, even with the expanded context. Please try simplifying or shortening your question significantly.";
+                return "I ran into a context memory limitation (NoKvSlot error). This is likely due to the model's small, fixed context size (2048 tokens). Please try simplifying or shortening your question significantly.";
             }
             catch (Exception ex)
             {
