@@ -7,7 +7,7 @@
     Title="MegassisClient">
 
     <ShellContent
-        Title="Home"
+        Title="MEGASSIS"
         ContentTemplate="{DataTemplate local:MainPage}"
         Route="MainPage" />
 
