@@ -10,11 +10,20 @@ builder.Services.AddSwaggerGen();
 // Register our AI Brain service
 builder.Services.AddSingleton<MegassisBrainService>();
 
+// CRITICAL: Add HttpClient service for Ollama communication
+builder.Services.AddHttpClient();
+
+
 var app = builder.Build();
 
-// Initialize the Brain (Load the heavy model into memory)
+// *** IMPORTANT CHANGE ***
+// The LLM model is now loaded by an external service (Ollama), 
+// so we no longer need the heavy initialization step here.
+// The code below is REMOVED/commented out.
+/*
 var brain = app.Services.GetRequiredService<MegassisBrainService>();
 await brain.InitializeAsync();
+*/
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())

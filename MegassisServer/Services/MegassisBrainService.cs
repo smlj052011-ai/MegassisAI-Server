@@ -1,160 +1,131 @@
-﻿using LLama;
-using LLama.Abstractions;
-using LLama.Common;
-using LLama.Exceptions;
+﻿using System.Text;
 using System.Text.Json;
-using System.Text;
-using System.Threading.Tasks;
+using System.Net.Http.Headers;
 
 namespace MegassisServer.Services
 {
+    // This service is now an HTTP client for the Ollama API, 
+    // replacing the problematic LLamaSharp library.
     public class MegassisBrainService
     {
-        // --- Private Fields for Singleton Instance ---
-        private LLamaWeights? _weights;
-        private LLama.Common.ModelParams? _modelParams;
-
-        // --- Model Configuration Constants ---
-        private readonly string _modelPath;
-        private readonly string _knowledgePath;
+        private readonly HttpClient _httpClient;
         private readonly IReadOnlyList<KnowledgeChunk> _knowledgeChunks;
-        private readonly string _systemPrompt;
 
-        // CRITICAL FIX V20: Drastically reduce context size to fit fixed 512 batch allocation
-        private readonly int _contextSize = 512;
+        // --- Configuration Constants ---
+        // Make sure Ollama is running on this port
+        private const string OllamaEndpoint = "http://localhost:11434/api/generate";
+        private const string ModelName = "tinyllama"; // Must match the model pulled in Ollama
+        private const string SystemPrompt = "You are Megassis, a helpful AI. Only use the provided 'CONTEXT: '. If the context has no answer, state that you do not have information.";
+        private const int MaxRAGContextChars = 500;
 
-        // Keep batch size low, but context size reduction is the primary focus now
-        private readonly int _batchSize = 64;
-
-        // Keep RAG context small to fit within the new 512 token context
-        private readonly int _maxRAGContextChars = 50;
-
-        public MegassisBrainService()
+        public MegassisBrainService(HttpClient httpClient)
         {
-            _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
-            _knowledgePath = Path.Combine(AppContext.BaseDirectory, "Data", "megassis_knowledge.json");
+            _httpClient = httpClient;
+            // Set a higher timeout for LLM responses
+            _httpClient.Timeout = TimeSpan.FromSeconds(120);
 
-            // Load Knowledge Base
+            // Load Knowledge Base (RAG logic remains the same)
+            var knowledgePath = Path.Combine(AppContext.BaseDirectory, "Data", "megassis_knowledge.json");
             try
             {
-                var jsonString = File.ReadAllText(_knowledgePath);
+                var jsonString = File.ReadAllText(knowledgePath);
                 _knowledgeChunks = JsonSerializer.Deserialize<IReadOnlyList<KnowledgeChunk>>(jsonString) ?? new List<KnowledgeChunk>();
+                Console.WriteLine("[INFO] Knowledge base loaded.");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[ERROR] Failed to load knowledge base: {ex.Message}");
                 _knowledgeChunks = new List<KnowledgeChunk>();
             }
-
-            // Simplified System Prompt to minimize token count
-            _systemPrompt = "You are Megassis, a helpful AI. Only use the provided 'CONTEXT: '. If the context has no answer, state that you do not have information.";
         }
 
-        /// <summary>
-        /// Loads the heavy model weights and defines parameters once (called from Program.cs).
-        /// </summary>
-        public async Task InitializeAsync()
+        // InitializeAsync is now OBSOLETE, the model is loaded by Ollama.
+        public Task InitializeAsync()
         {
-            Console.WriteLine("[INFO] Initializing LLM...");
-            try
-            {
-                // Define Model/Context Parameters ONCE
-                _modelParams = new LLama.Common.ModelParams(_modelPath)
-                {
-                    // CRITICAL: New Context Size 512
-                    ContextSize = (uint)_contextSize,
-                    BatchSize = (uint)_batchSize,
-                    MainGpu = 0
-                };
-
-                // Load Model Weights ONCE
-                _weights = LLamaWeights.LoadFromFile(_modelParams);
-
-                Console.WriteLine($"[INFO] LLM Weights loaded successfully. Context Size: {_contextSize}, Batch Size: {_batchSize}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[FATAL] Failed to initialize LLM: {ex.Message}");
-            }
-            await Task.CompletedTask;
+            Console.WriteLine("[INFO] Initialization complete (Ollama dependency).");
+            return Task.CompletedTask;
         }
 
         /// <summary>
-        /// Runs inference by creating a new StatelessExecutor and Context per request.
+        /// Runs inference by calling the external Ollama service.
         /// </summary>
         public async Task<string> AskMegassis(string userQuestion)
         {
-            if (_weights == null || _modelParams == null)
+            try
             {
-                return "The LLM service failed to initialize. Check server logs.";
-            }
+                // 1. Retrieval Augmented Generation (RAG)
+                var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 2);
+                string finalUserQuery;
 
-            // Define Inference Parameters
-            var inferenceParams = new InferenceParams
-            {
-                MaxTokens = 256, // Reducing max output tokens slightly for safety
-                AntiPrompts = new List<string> { "User:", "</s>", "Human:" },
-            };
-
-            // Use 'using' statement for robust, automatic disposal of the context
-            using (var context = _weights.CreateContext(_modelParams))
-            {
-                var executor = new StatelessExecutor(_weights, _modelParams);
-
-                try
+                if (relevantChunks.Any())
                 {
-                    // 1. Retrieval Augmented Generation (RAG)
-                    var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 1);
-
-                    string finalUserQuery;
-                    if (relevantChunks.Any())
+                    var contextBuilder = new StringBuilder();
+                    foreach (var chunk in relevantChunks)
                     {
-                        var chunk = relevantChunks.First();
-
-                        // Use the small RAG context limit (50 chars)
                         string chunkContent = chunk.Content;
-                        if (chunkContent.Length > _maxRAGContextChars)
+                        if (chunkContent.Length > MaxRAGContextChars)
                         {
-                            chunkContent = chunkContent.Substring(0, _maxRAGContextChars) + "...";
+                            chunkContent = chunkContent.Substring(0, MaxRAGContextChars) + "...";
                         }
-
-                        // PROMPT OPTIMIZATION: Inject RAG context
-                        finalUserQuery = $"CONTEXT: {chunkContent.Trim()}\n\nUSER QUESTION: {userQuestion}";
+                        contextBuilder.AppendLine(chunkContent);
+                        contextBuilder.AppendLine("---");
                     }
-                    else
-                    {
-                        finalUserQuery = userQuestion;
-                    }
-
-                    // 2. Manually format full prompt (TinyLlama Chat template)
-                    var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
-
-                    // 3. Run the inference
-                    var result = new StringBuilder();
-                    await foreach (var text in executor.InferAsync(fullPrompt, inferenceParams))
-                    {
-                        result.Append(text);
-                    }
-
-                    return result.ToString().Trim();
+                    string contextText = contextBuilder.ToString().Trim();
+                    finalUserQuery = $"CONTEXT: {contextText}\n\nUSER QUESTION: {userQuestion}";
                 }
-                catch (LLamaDecodeError ex)
+                else
                 {
-                    Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                    // If this still fails, the prompt is too long for the 512 context.
-                    return "I ran into a persistent context memory issue. The model cannot process a prompt of that length. Please try asking a single, very short question.";
+                    finalUserQuery = userQuestion;
                 }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"[ERROR] Unhandled exception in AskMegassis: {ex.GetType().Name}: {ex.Message}");
-                    Console.WriteLine(ex.ToString());
 
-                    return "A server error occurred while trying to generate the response.";
+                // 2. Format the prompt using the chat template
+                var fullPrompt = $"<|system|>{SystemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
+
+                // 3. Construct the JSON payload for Ollama
+                var requestBody = new
+                {
+                    model = ModelName,
+                    prompt = fullPrompt,
+                    stream = false, // We use false for simplicity in an API response
+                    options = new
+                    {
+                        temperature = 0.5,
+                        num_ctx = 512,
+                        seed = 42
+                    }
+                };
+
+                var content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json");
+
+                // 4. Send the request to Ollama
+                var response = await _httpClient.PostAsync(OllamaEndpoint, content);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorContent = await response.Content.ReadAsStringAsync();
+                    Console.WriteLine($"[OLLAMA ERROR] Status: {response.StatusCode}. Response: {errorContent}");
+                    return $"Error communicating with the LLM service (Ollama). Status: {response.StatusCode}. Please ensure Ollama is running and the '{ModelName}' model is pulled.";
                 }
+
+                // 5. Process the JSON response
+                var responseJson = await response.Content.ReadAsStringAsync();
+
+                // Ollama response is a JSON object with a 'response' field
+                using var doc = JsonDocument.Parse(responseJson);
+                var answerElement = doc.RootElement.GetProperty("response");
+
+                return answerElement.GetString()?.Trim() ?? "LLM returned an empty response.";
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ERROR] Unhandled exception in AskMegassis: {ex.GetType().Name}: {ex.Message}");
+                Console.WriteLine(ex.ToString());
+
+                return "A server error occurred while processing the request. Check that Ollama is running.";
             }
         }
 
-        // --- KnowledgeChunk definition and RAG helper class remain the same ---
+        // --- Data Models and RAG Helper ---
 
         public class KnowledgeChunk
         {
