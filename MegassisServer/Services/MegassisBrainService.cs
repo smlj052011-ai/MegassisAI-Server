@@ -4,6 +4,7 @@ using LLama.Common;
 using LLama.Exceptions;
 using System.Text.Json;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace MegassisServer.Services
 {
@@ -16,15 +17,13 @@ namespace MegassisServer.Services
         private readonly string _systemPrompt;
 
         // Context configuration
-        // CRITICAL FIX: Setting ContextSize to 2048 to match the actual size reported by the LLama backend logs.
+        // Matching the fixed size reported by the LLama logs to prevent conflicts.
         private readonly int _contextSize = 2048;
 
-        // AGGRESSIVE LIMIT: Hard cap on RAG context due to the model's fixed 2048 token limit.
+        // AGGRESSIVE LIMIT: Hard cap on RAG context.
         private readonly int _maxRAGContextChars = 500;
 
-        // CRITICAL FIX: Aggressively reducing the batch size to 128 to ensure the initial decode call 
-        // does not fail due to the 'batch of size 512' error reported in the logs.
-        private readonly int _batchSize = 128;
+        // NOTE: The _batchSize constant is removed, as InteractiveExecutor handles batching dynamically.
 
         public MegassisBrainService()
         {
@@ -45,7 +44,7 @@ namespace MegassisServer.Services
                 _knowledgeChunks = new List<KnowledgeChunk>(); // Initialize empty list on failure
             }
 
-            // MODIFIED SYSTEM PROMPT: Now includes the RAG instruction to save prompt template tokens.
+            // MODIFIED SYSTEM PROMPT
             _systemPrompt = "You are Megassis, a friendly, helpful, and concise AI assistant. ALWAYS base your response strictly on the provided context, which is prefixed with 'CONTEXT: '. If the context does not contain the answer, state that you do not have information on that topic. Do not make up answers.";
         }
 
@@ -56,15 +55,11 @@ namespace MegassisServer.Services
 
             try
             {
-                // --- 1. Load Weights and Create Context/Executor on every call ---
+                // --- 1. Load Weights and Create Context ---
 
-                // Define Model/Context Parameters 
                 var modelParams = new LLama.Common.ModelParams(_modelPath)
                 {
-                    // Using 2048 to match the model's fixed context size reported in logs.
                     ContextSize = (uint)_contextSize,
-                    // Lowering BatchSize to reduce memory allocation pressure.
-                    BatchSize = (uint)_batchSize,
                     MainGpu = 0 // Use CPU/main GPU
                 };
 
@@ -74,13 +69,13 @@ namespace MegassisServer.Services
                 // Create Context (memory/KV cache)
                 context = weights.CreateContext(modelParams);
 
-                // Create Executor
-                var executor = new StatelessExecutor(weights, modelParams);
+                // CRITICAL FIX: Switch to InteractiveExecutor to bypass batching issues
+                var executor = new InteractiveExecutor(context);
 
-                // Define Inference Parameters (using the simplest version)
+                // Define Inference Parameters
                 var inferenceParams = new InferenceParams
                 {
-                    MaxTokens = 512, // Limit response length
+                    MaxTokens = 512,
                     AntiPrompts = new List<string> { "User:", "</s>", "Human:" },
                 };
 
@@ -117,13 +112,23 @@ namespace MegassisServer.Services
                 }
 
                 // 3. Manually format full prompt (TinyLlama Chat template)
-                // Use the streamlined finalUserQuery
-                var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
+                // The InteractiveExecutor requires the initial prompt to be sent *without* the assistant tag.
+                // The prompt is the combination of System and User query.
+                var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>";
 
                 // 4. Run the inference
                 var result = new StringBuilder();
+
+                // Set the initial prompt (this loads the prompt into the context token by token)
+                var firstRun = true;
                 await foreach (var text in executor.InferAsync(fullPrompt, inferenceParams))
                 {
+                    // The first result is often the system prompt/prefix, which we ignore.
+                    if (firstRun)
+                    {
+                        firstRun = false;
+                        continue;
+                    }
                     result.Append(text);
                 }
 
@@ -131,8 +136,9 @@ namespace MegassisServer.Services
             }
             catch (LLamaDecodeError ex)
             {
+                // This is the error we are specifically targeting to fix.
                 Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                return "I ran into a persistent context memory limitation (NoKvSlot error). The model's fixed 2048 token context size is very restrictive. Please try simplifying or shortening your question significantly.";
+                return "I ran into a persistent context memory limitation (NoKvSlot error). I have implemented the last possible fix, but the model's fixed 2048 token context size is extremely restrictive. Please try simplifying or shortening your question significantly.";
             }
             catch (Exception ex)
             {
