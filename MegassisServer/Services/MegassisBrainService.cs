@@ -8,8 +8,6 @@ using System.Threading.Tasks;
 
 namespace MegassisServer.Services
 {
-    // Implementation uses a true Singleton pattern for weights, 
-    // but creates a new Executor per request to resolve batch size conflicts.
     public class MegassisBrainService
     {
         // --- Private Fields for Singleton Instance ---
@@ -24,8 +22,11 @@ namespace MegassisServer.Services
 
         // CRITICAL: Fixed parameters to avoid the 'NoKvSlot' error
         private readonly int _contextSize = 2048;
-        private readonly int _batchSize = 128; // Reduced batch size
-        private readonly int _maxRAGContextChars = 500;
+        private readonly int _batchSize = 128; // We keep this low, but the environment may ignore it.
+
+        // AGGRESSIVE FIX: Dramatically reduce RAG context size to avoid exceeding the fixed 512 slot initial batch.
+        // 150 characters is approximately 30-50 tokens.
+        private readonly int _maxRAGContextChars = 150;
 
         public MegassisBrainService()
         {
@@ -33,7 +34,7 @@ namespace MegassisServer.Services
             _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
             _knowledgePath = Path.Combine(AppContext.BaseDirectory, "Data", "megassis_knowledge.json");
 
-            // Load Knowledge Base (This is fast, so it stays in the constructor)
+            // Load Knowledge Base
             try
             {
                 var jsonString = File.ReadAllText(_knowledgePath);
@@ -77,7 +78,7 @@ namespace MegassisServer.Services
         }
 
         /// <summary>
-        /// Runs inference by creating a new Executor (and temporary Context) per request to enforce parameters.
+        /// Runs inference by creating a new InteractiveExecutor per request.
         /// </summary>
         public async Task<string> AskMegassis(string userQuestion)
         {
@@ -91,44 +92,42 @@ namespace MegassisServer.Services
             {
                 MaxTokens = 512,
                 AntiPrompts = new List<string> { "User:", "</s>", "Human:" },
+                // Interactive Executor doesn't stream, so we rely on the return.
             };
 
-            // Use the weights and params to create a new StatelessExecutor and Context for THIS request.
-            // This is the CRITICAL change to force batch size enforcement.
             LLamaContext? context = null;
-            StatelessExecutor? executor = null;
+            InteractiveExecutor? executor = null;
 
             try
             {
                 // Create Context (memory/KV cache) for this specific request
                 context = _weights.CreateContext(_modelParams);
-                executor = new StatelessExecutor(_weights, _modelParams);
+
+                // FINAL FIX: Switching to InteractiveExecutor
+                executor = new InteractiveExecutor(context);
 
                 // 1. Retrieval Augmented Generation (RAG)
-                var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 2);
+                var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 1); // Get only 1 chunk now
 
                 string finalUserQuery;
-                // ... (RAG context building logic is identical)
                 if (relevantChunks.Any())
                 {
                     var contextBuilder = new StringBuilder();
                     foreach (var chunk in relevantChunks)
                     {
-                        if (contextBuilder.Length + chunk.Content.Length + 50 > _maxRAGContextChars)
+                        // Use the new, smaller RAG context limit
+                        string chunkContent = chunk.Content;
+                        if (chunkContent.Length > _maxRAGContextChars)
                         {
-                            break;
+                            chunkContent = chunkContent.Substring(0, _maxRAGContextChars);
                         }
-                        contextBuilder.AppendLine(chunk.Content);
+                        contextBuilder.AppendLine(chunkContent);
                         contextBuilder.AppendLine("---");
                     }
 
                     string contextText = contextBuilder.ToString().Trim();
-                    if (contextText.Length > _maxRAGContextChars)
-                    {
-                        contextText = contextText.Substring(0, _maxRAGContextChars) + "... [TRUNCATED]";
-                    }
 
-                    // PROMPT OPTIMIZATION
+                    // PROMPT OPTIMIZATION: Inject RAG context directly before the user question
                     finalUserQuery = $"CONTEXT: {contextText}\n\nUSER QUESTION: {userQuestion}";
                 }
                 else
@@ -139,7 +138,8 @@ namespace MegassisServer.Services
                 // 2. Manually format full prompt (TinyLlama Chat template)
                 var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
 
-                // 3. Run the inference
+                // 3. Run the inference (InteractiveExecutor uses RunAsync/InferAsync in older versions)
+                // Use InferAsync, which is typically supported by both executor types for stateless prompts.
                 var result = new StringBuilder();
                 await foreach (var text in executor.InferAsync(fullPrompt, inferenceParams))
                 {
@@ -151,8 +151,8 @@ namespace MegassisServer.Services
             catch (LLamaDecodeError ex)
             {
                 Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                // The error now means the prompt itself is too long for the 2048 token context.
-                return "I ran into a context limit. The current prompt is too long for the model's 2048 token context. Please try simplifying your question.";
+                // If this still fails, the prompt is too long even with minimized RAG.
+                return "I ran into a persistent context memory issue. The model's context is full. Please try asking a single, very short question.";
             }
             catch (Exception ex)
             {
@@ -163,7 +163,8 @@ namespace MegassisServer.Services
             }
             finally
             {
-               
+                // We must dispose of the short-lived context created for this request.
+                // Executor disposal is not needed (as per v17 fix).
                 context?.Dispose();
             }
         }
