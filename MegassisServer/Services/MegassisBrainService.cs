@@ -8,31 +8,32 @@ using System.Threading.Tasks;
 
 namespace MegassisServer.Services
 {
+    // The model loading logic is moved to InitializeAsync() for Singleton lifetime.
     public class MegassisBrainService
     {
-        // Model and path constants (defined once)
+        // --- Private Fields for Singleton Instance ---
+        private LLamaWeights? _weights;
+        private LLamaContext? _context;
+        private StatelessExecutor? _executor;
+
+        // --- Model Configuration Constants ---
         private readonly string _modelPath;
         private readonly string _knowledgePath;
         private readonly IReadOnlyList<KnowledgeChunk> _knowledgeChunks;
         private readonly string _systemPrompt;
 
-        // Context configuration
-        // Matching the fixed size reported by the LLama logs to prevent conflicts.
+        // CRITICAL: Fixed parameters to avoid the 'NoKvSlot' error
         private readonly int _contextSize = 2048;
-
-        // AGGRESSIVE LIMIT: Hard cap on RAG context.
+        private readonly int _batchSize = 128; // Reduced batch size
         private readonly int _maxRAGContextChars = 500;
-
-        // NOTE: The _batchSize constant is removed, as InteractiveExecutor handles batching dynamically.
 
         public MegassisBrainService()
         {
-            // --- Model and Prompt Configuration ---
-
+            // --- Configuration: Paths and Prompts (Lightweight setup in constructor) ---
             _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
             _knowledgePath = Path.Combine(AppContext.BaseDirectory, "Data", "megassis_knowledge.json");
 
-            // Load Knowledge Base
+            // Load Knowledge Base (This is fast, so it stays in the constructor)
             try
             {
                 var jsonString = File.ReadAllText(_knowledgePath);
@@ -41,37 +42,58 @@ namespace MegassisServer.Services
             catch (Exception ex)
             {
                 Console.WriteLine($"[ERROR] Failed to load knowledge base: {ex.Message}");
-                _knowledgeChunks = new List<KnowledgeChunk>(); // Initialize empty list on failure
+                _knowledgeChunks = new List<KnowledgeChunk>();
             }
 
-            // MODIFIED SYSTEM PROMPT
             _systemPrompt = "You are Megassis, a friendly, helpful, and concise AI assistant. ALWAYS base your response strictly on the provided context, which is prefixed with 'CONTEXT: '. If the context does not contain the answer, state that you do not have information on that topic. Do not make up answers.";
         }
 
-        public async Task<string> AskMegassis(string userQuestion)
+        /// <summary>
+        /// Loads the heavy model into memory once when the application starts (called from Program.cs).
+        /// </summary>
+        public async Task InitializeAsync()
         {
-            LLamaWeights? weights = null;
-            LLamaContext? context = null;
-
+            Console.WriteLine("[INFO] Initializing LLM...");
             try
             {
-                // --- 1. Load Weights and Create Context ---
-
                 var modelParams = new LLama.Common.ModelParams(_modelPath)
                 {
                     ContextSize = (uint)_contextSize,
+                    BatchSize = (uint)_batchSize,
                     MainGpu = 0 // Use CPU/main GPU
                 };
 
-                // Load Model Weights (resource)
-                weights = LLamaWeights.LoadFromFile(modelParams);
+                // Load Model Weights ONCE
+                _weights = LLamaWeights.LoadFromFile(modelParams);
 
-                // Create Context (memory/KV cache)
-                context = weights.CreateContext(modelParams);
+                // Create Context ONCE
+                _context = _weights.CreateContext(modelParams);
 
-                // CRITICAL FIX: Switch to InteractiveExecutor to bypass batching issues
-                var executor = new InteractiveExecutor(context);
+                // Create the Executor ONCE
+                _executor = new StatelessExecutor(_weights, modelParams);
 
+                Console.WriteLine($"[INFO] LLM initialized successfully. Context Size: {_contextSize}, Batch Size: {_batchSize}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[FATAL] Failed to initialize LLM: {ex.Message}");
+                // In a production app, you might crash the app or disable the service here.
+            }
+            await Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Runs inference using the pre-loaded Singleton model components.
+        /// </summary>
+        public async Task<string> AskMegassis(string userQuestion)
+        {
+            if (_executor == null)
+            {
+                return "The LLM service failed to initialize properly. Check server logs.";
+            }
+
+            try
+            {
                 // Define Inference Parameters
                 var inferenceParams = new InferenceParams
                 {
@@ -79,7 +101,7 @@ namespace MegassisServer.Services
                     AntiPrompts = new List<string> { "User:", "</s>", "Human:" },
                 };
 
-                // 2. Retrieval Augmented Generation (RAG)
+                // 1. Retrieval Augmented Generation (RAG)
                 var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 2);
 
                 string finalUserQuery;
@@ -102,33 +124,21 @@ namespace MegassisServer.Services
                         contextText = contextText.Substring(0, _maxRAGContextChars) + "... [TRUNCATED]";
                     }
 
-                    // PROMPT OPTIMIZATION: Inject RAG context directly before the user question
+                    // PROMPT OPTIMIZATION
                     finalUserQuery = $"CONTEXT: {contextText}\n\nUSER QUESTION: {userQuestion}";
                 }
                 else
                 {
-                    // No relevant context found, ask the question directly
                     finalUserQuery = userQuestion;
                 }
 
-                // 3. Manually format full prompt (TinyLlama Chat template)
-                // The InteractiveExecutor requires the initial prompt to be sent *without* the assistant tag.
-                // The prompt is the combination of System and User query.
-                var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>";
+                // 2. Manually format full prompt (TinyLlama Chat template)
+                var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
 
-                // 4. Run the inference
+                // 3. Run the inference using the Singleton executor
                 var result = new StringBuilder();
-
-                // Set the initial prompt (this loads the prompt into the context token by token)
-                var firstRun = true;
-                await foreach (var text in executor.InferAsync(fullPrompt, inferenceParams))
+                await foreach (var text in _executor.InferAsync(fullPrompt, inferenceParams))
                 {
-                    // The first result is often the system prompt/prefix, which we ignore.
-                    if (firstRun)
-                    {
-                        firstRun = false;
-                        continue;
-                    }
                     result.Append(text);
                 }
 
@@ -136,27 +146,21 @@ namespace MegassisServer.Services
             }
             catch (LLamaDecodeError ex)
             {
-                // This is the error we are specifically targeting to fix.
                 Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                return "I ran into a persistent context memory limitation (NoKvSlot error). I have implemented the last possible fix, but the model's fixed 2048 token context size is extremely restrictive. Please try simplifying or shortening your question significantly.";
+                // This error now means the current prompt + RAG context size exceeds the 2048 limit.
+                return "I ran into a context limit. The model's context is full. Please try simplifying your question.";
             }
             catch (Exception ex)
             {
-                // Log all other exceptions
                 Console.WriteLine($"[ERROR] Unhandled exception in AskMegassis: {ex.GetType().Name}: {ex.Message}");
                 Console.WriteLine(ex.ToString());
 
-                return "A server error occurred while trying to generate the response. Please check the server console for details.";
-            }
-            finally
-            {
-                // 5. CRITICAL STEP: Dispose resources in the finally block
-                context?.Dispose();
-                weights?.Dispose();
+                return "A server error occurred while trying to generate the response.";
             }
         }
 
-        // --- KnowledgeChunk definition ---
+        // --- KnowledgeChunk definition and RAG helper class remain the same ---
+
         public class KnowledgeChunk
         {
             public string Id { get; set; } = Guid.NewGuid().ToString();
@@ -164,14 +168,12 @@ namespace MegassisServer.Services
             public string Content { get; set; } = string.Empty;
         }
 
-        // --- RAG helper class ---
         private static class RAG
         {
             public static IReadOnlyList<KnowledgeChunk> RetrieveRelevantChunks(IReadOnlyList<KnowledgeChunk> knowledgeBase, string query, int count)
             {
-                // Simple keyword-based RAG simulation: Find the top 'count' chunks that contain the most query keywords.
                 var queryWords = query.ToLower().Split(new[] { ' ', ',', '.', '?', '!' }, StringSplitOptions.RemoveEmptyEntries)
-                                      .Where(w => w.Length > 3) // Ignore very short words
+                                      .Where(w => w.Length > 3)
                                       .Distinct();
 
                 var scoredChunks = knowledgeBase
