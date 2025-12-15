@@ -20,13 +20,13 @@ namespace MegassisServer.Services
         private readonly IReadOnlyList<KnowledgeChunk> _knowledgeChunks;
         private readonly string _systemPrompt;
 
-        // CRITICAL: Fixed parameters to avoid the 'NoKvSlot' error
-        private readonly int _contextSize = 2048;
+        // CRITICAL FIX V20: Drastically reduce context size to fit fixed 512 batch allocation
+        private readonly int _contextSize = 512;
 
-        // FINAL ATTEMPT: Ultra-conservative batch size to guarantee space
+        // Keep batch size low, but context size reduction is the primary focus now
         private readonly int _batchSize = 64;
 
-        // AGGRESSIVE FIX: Drastically reduce RAG context size
+        // Keep RAG context small to fit within the new 512 token context
         private readonly int _maxRAGContextChars = 50;
 
         public MegassisBrainService()
@@ -46,7 +46,7 @@ namespace MegassisServer.Services
                 _knowledgeChunks = new List<KnowledgeChunk>();
             }
 
-            // Simplified System Prompt to save a few tokens
+            // Simplified System Prompt to minimize token count
             _systemPrompt = "You are Megassis, a helpful AI. Only use the provided 'CONTEXT: '. If the context has no answer, state that you do not have information.";
         }
 
@@ -61,8 +61,9 @@ namespace MegassisServer.Services
                 // Define Model/Context Parameters ONCE
                 _modelParams = new LLama.Common.ModelParams(_modelPath)
                 {
+                    // CRITICAL: New Context Size 512
                     ContextSize = (uint)_contextSize,
-                    BatchSize = (uint)_batchSize, // Now 64
+                    BatchSize = (uint)_batchSize,
                     MainGpu = 0
                 };
 
@@ -91,41 +92,34 @@ namespace MegassisServer.Services
             // Define Inference Parameters
             var inferenceParams = new InferenceParams
             {
-                MaxTokens = 512,
+                MaxTokens = 256, // Reducing max output tokens slightly for safety
                 AntiPrompts = new List<string> { "User:", "</s>", "Human:" },
             };
 
             // Use 'using' statement for robust, automatic disposal of the context
             using (var context = _weights.CreateContext(_modelParams))
             {
-                // Revert to StatelessExecutor as it is better suited for API requests
                 var executor = new StatelessExecutor(_weights, _modelParams);
 
                 try
                 {
                     // 1. Retrieval Augmented Generation (RAG)
-                    // Retrieve only 1 chunk to minimize prompt size
                     var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 1);
 
                     string finalUserQuery;
                     if (relevantChunks.Any())
                     {
-                        var contextBuilder = new StringBuilder();
                         var chunk = relevantChunks.First();
 
-                        // Use the new, extremely small RAG context limit (50 chars)
+                        // Use the small RAG context limit (50 chars)
                         string chunkContent = chunk.Content;
                         if (chunkContent.Length > _maxRAGContextChars)
                         {
                             chunkContent = chunkContent.Substring(0, _maxRAGContextChars) + "...";
                         }
-                        contextBuilder.AppendLine(chunkContent);
-                        contextBuilder.AppendLine("---");
-
-                        string contextText = contextBuilder.ToString().Trim();
 
                         // PROMPT OPTIMIZATION: Inject RAG context
-                        finalUserQuery = $"CONTEXT: {contextText}\n\nUSER QUESTION: {userQuestion}";
+                        finalUserQuery = $"CONTEXT: {chunkContent.Trim()}\n\nUSER QUESTION: {userQuestion}";
                     }
                     else
                     {
@@ -147,8 +141,8 @@ namespace MegassisServer.Services
                 catch (LLamaDecodeError ex)
                 {
                     Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                    // This now means the prompt exceeds the tiny memory slot allocated (64 tokens approx).
-                    return "I ran into a context memory issue. The model cannot process a prompt of that length. Please try asking a single, very short question.";
+                    // If this still fails, the prompt is too long for the 512 context.
+                    return "I ran into a persistent context memory issue. The model cannot process a prompt of that length. Please try asking a single, very short question.";
                 }
                 catch (Exception ex)
                 {
@@ -157,8 +151,7 @@ namespace MegassisServer.Services
 
                     return "A server error occurred while trying to generate the response.";
                 }
-            } // Context is automatically disposed here
-
+            }
         }
 
         // --- KnowledgeChunk definition and RAG helper class remain the same ---
