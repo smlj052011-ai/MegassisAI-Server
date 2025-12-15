@@ -8,13 +8,13 @@ using System.Threading.Tasks;
 
 namespace MegassisServer.Services
 {
-    // The model loading logic is moved to InitializeAsync() for Singleton lifetime.
+    // Implementation uses a true Singleton pattern for weights, 
+    // but creates a new Executor per request to resolve batch size conflicts.
     public class MegassisBrainService
     {
         // --- Private Fields for Singleton Instance ---
         private LLamaWeights? _weights;
-        private LLamaContext? _context;
-        private StatelessExecutor? _executor;
+        private LLama.Common.ModelParams? _modelParams;
 
         // --- Model Configuration Constants ---
         private readonly string _modelPath;
@@ -49,14 +49,15 @@ namespace MegassisServer.Services
         }
 
         /// <summary>
-        /// Loads the heavy model into memory once when the application starts (called from Program.cs).
+        /// Loads the heavy model weights and defines parameters once (called from Program.cs).
         /// </summary>
         public async Task InitializeAsync()
         {
             Console.WriteLine("[INFO] Initializing LLM...");
             try
             {
-                var modelParams = new LLama.Common.ModelParams(_modelPath)
+                // Define Model/Context Parameters ONCE
+                _modelParams = new LLama.Common.ModelParams(_modelPath)
                 {
                     ContextSize = (uint)_contextSize,
                     BatchSize = (uint)_batchSize,
@@ -64,47 +65,50 @@ namespace MegassisServer.Services
                 };
 
                 // Load Model Weights ONCE
-                _weights = LLamaWeights.LoadFromFile(modelParams);
+                _weights = LLamaWeights.LoadFromFile(_modelParams);
 
-                // Create Context ONCE
-                _context = _weights.CreateContext(modelParams);
-
-                // Create the Executor ONCE
-                _executor = new StatelessExecutor(_weights, modelParams);
-
-                Console.WriteLine($"[INFO] LLM initialized successfully. Context Size: {_contextSize}, Batch Size: {_batchSize}");
+                Console.WriteLine($"[INFO] LLM Weights loaded successfully. Context Size: {_contextSize}, Batch Size: {_batchSize}");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[FATAL] Failed to initialize LLM: {ex.Message}");
-                // In a production app, you might crash the app or disable the service here.
             }
             await Task.CompletedTask;
         }
 
         /// <summary>
-        /// Runs inference using the pre-loaded Singleton model components.
+        /// Runs inference by creating a new Executor (and temporary Context) per request to enforce parameters.
         /// </summary>
         public async Task<string> AskMegassis(string userQuestion)
         {
-            if (_executor == null)
+            if (_weights == null || _modelParams == null)
             {
-                return "The LLM service failed to initialize properly. Check server logs.";
+                return "The LLM service failed to initialize. Check server logs.";
             }
+
+            // Define Inference Parameters
+            var inferenceParams = new InferenceParams
+            {
+                MaxTokens = 512,
+                AntiPrompts = new List<string> { "User:", "</s>", "Human:" },
+            };
+
+            // Use the weights and params to create a new StatelessExecutor and Context for THIS request.
+            // This is the CRITICAL change to force batch size enforcement.
+            LLamaContext? context = null;
+            StatelessExecutor? executor = null;
 
             try
             {
-                // Define Inference Parameters
-                var inferenceParams = new InferenceParams
-                {
-                    MaxTokens = 512,
-                    AntiPrompts = new List<string> { "User:", "</s>", "Human:" },
-                };
+                // Create Context (memory/KV cache) for this specific request
+                context = _weights.CreateContext(_modelParams);
+                executor = new StatelessExecutor(_weights, _modelParams);
 
                 // 1. Retrieval Augmented Generation (RAG)
                 var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 2);
 
                 string finalUserQuery;
+                // ... (RAG context building logic is identical)
                 if (relevantChunks.Any())
                 {
                     var contextBuilder = new StringBuilder();
@@ -135,9 +139,9 @@ namespace MegassisServer.Services
                 // 2. Manually format full prompt (TinyLlama Chat template)
                 var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
 
-                // 3. Run the inference using the Singleton executor
+                // 3. Run the inference
                 var result = new StringBuilder();
-                await foreach (var text in _executor.InferAsync(fullPrompt, inferenceParams))
+                await foreach (var text in executor.InferAsync(fullPrompt, inferenceParams))
                 {
                     result.Append(text);
                 }
@@ -147,8 +151,8 @@ namespace MegassisServer.Services
             catch (LLamaDecodeError ex)
             {
                 Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                // This error now means the current prompt + RAG context size exceeds the 2048 limit.
-                return "I ran into a context limit. The model's context is full. Please try simplifying your question.";
+                // The error now means the prompt itself is too long for the 2048 token context.
+                return "I ran into a context limit. The current prompt is too long for the model's 2048 token context. Please try simplifying your question.";
             }
             catch (Exception ex)
             {
@@ -156,6 +160,11 @@ namespace MegassisServer.Services
                 Console.WriteLine(ex.ToString());
 
                 return "A server error occurred while trying to generate the response.";
+            }
+            finally
+            {
+               
+                context?.Dispose();
             }
         }
 
