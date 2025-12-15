@@ -16,9 +16,15 @@ namespace MegassisServer.Services
         private readonly string _systemPrompt;
 
         // Context configuration
-        private readonly int _contextSize = 4096;
-        // AGGRESSIVE LIMIT: Hard cap on RAG context due to the model being limited to 2048 tokens.
+        // CRITICAL FIX: Setting ContextSize to 2048 to match the actual size reported by the LLama backend logs.
+        private readonly int _contextSize = 2048;
+
+        // AGGRESSIVE LIMIT: Hard cap on RAG context due to the model's fixed 2048 token limit.
         private readonly int _maxRAGContextChars = 500;
+
+        // CRITICAL FIX: Aggressively reducing the batch size to 128 to ensure the initial decode call 
+        // does not fail due to the 'batch of size 512' error reported in the logs.
+        private readonly int _batchSize = 128;
 
         public MegassisBrainService()
         {
@@ -55,7 +61,10 @@ namespace MegassisServer.Services
                 // Define Model/Context Parameters 
                 var modelParams = new LLama.Common.ModelParams(_modelPath)
                 {
+                    // Using 2048 to match the model's fixed context size reported in logs.
                     ContextSize = (uint)_contextSize,
+                    // Lowering BatchSize to reduce memory allocation pressure.
+                    BatchSize = (uint)_batchSize,
                     MainGpu = 0 // Use CPU/main GPU
                 };
 
@@ -123,7 +132,7 @@ namespace MegassisServer.Services
             catch (LLamaDecodeError ex)
             {
                 Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                return "I ran into a persistent context memory limitation (NoKvSlot error). This TinyLlama model seems to have a fixed, small context size (2048 tokens). Please try simplifying or shortening your question significantly.";
+                return "I ran into a persistent context memory limitation (NoKvSlot error). The model's fixed 2048 token context size is very restrictive. Please try simplifying or shortening your question significantly.";
             }
             catch (Exception ex)
             {
