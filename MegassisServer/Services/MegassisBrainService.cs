@@ -22,15 +22,15 @@ namespace MegassisServer.Services
 
         // CRITICAL: Fixed parameters to avoid the 'NoKvSlot' error
         private readonly int _contextSize = 2048;
-        private readonly int _batchSize = 128; // We keep this low, but the environment may ignore it.
 
-        // AGGRESSIVE FIX: Dramatically reduce RAG context size to avoid exceeding the fixed 512 slot initial batch.
-        // 150 characters is approximately 30-50 tokens.
-        private readonly int _maxRAGContextChars = 150;
+        // FINAL ATTEMPT: Ultra-conservative batch size to guarantee space
+        private readonly int _batchSize = 64;
+
+        // AGGRESSIVE FIX: Drastically reduce RAG context size
+        private readonly int _maxRAGContextChars = 50;
 
         public MegassisBrainService()
         {
-            // --- Configuration: Paths and Prompts (Lightweight setup in constructor) ---
             _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf");
             _knowledgePath = Path.Combine(AppContext.BaseDirectory, "Data", "megassis_knowledge.json");
 
@@ -46,7 +46,8 @@ namespace MegassisServer.Services
                 _knowledgeChunks = new List<KnowledgeChunk>();
             }
 
-            _systemPrompt = "You are Megassis, a friendly, helpful, and concise AI assistant. ALWAYS base your response strictly on the provided context, which is prefixed with 'CONTEXT: '. If the context does not contain the answer, state that you do not have information on that topic. Do not make up answers.";
+            // Simplified System Prompt to save a few tokens
+            _systemPrompt = "You are Megassis, a helpful AI. Only use the provided 'CONTEXT: '. If the context has no answer, state that you do not have information.";
         }
 
         /// <summary>
@@ -61,8 +62,8 @@ namespace MegassisServer.Services
                 _modelParams = new LLama.Common.ModelParams(_modelPath)
                 {
                     ContextSize = (uint)_contextSize,
-                    BatchSize = (uint)_batchSize,
-                    MainGpu = 0 // Use CPU/main GPU
+                    BatchSize = (uint)_batchSize, // Now 64
+                    MainGpu = 0
                 };
 
                 // Load Model Weights ONCE
@@ -78,7 +79,7 @@ namespace MegassisServer.Services
         }
 
         /// <summary>
-        /// Runs inference by creating a new InteractiveExecutor per request.
+        /// Runs inference by creating a new StatelessExecutor and Context per request.
         /// </summary>
         public async Task<string> AskMegassis(string userQuestion)
         {
@@ -92,81 +93,72 @@ namespace MegassisServer.Services
             {
                 MaxTokens = 512,
                 AntiPrompts = new List<string> { "User:", "</s>", "Human:" },
-                // Interactive Executor doesn't stream, so we rely on the return.
             };
 
-            LLamaContext? context = null;
-            InteractiveExecutor? executor = null;
-
-            try
+            // Use 'using' statement for robust, automatic disposal of the context
+            using (var context = _weights.CreateContext(_modelParams))
             {
-                // Create Context (memory/KV cache) for this specific request
-                context = _weights.CreateContext(_modelParams);
+                // Revert to StatelessExecutor as it is better suited for API requests
+                var executor = new StatelessExecutor(_weights, _modelParams);
 
-                // FINAL FIX: Switching to InteractiveExecutor
-                executor = new InteractiveExecutor(context);
-
-                // 1. Retrieval Augmented Generation (RAG)
-                var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 1); // Get only 1 chunk now
-
-                string finalUserQuery;
-                if (relevantChunks.Any())
+                try
                 {
-                    var contextBuilder = new StringBuilder();
-                    foreach (var chunk in relevantChunks)
+                    // 1. Retrieval Augmented Generation (RAG)
+                    // Retrieve only 1 chunk to minimize prompt size
+                    var relevantChunks = RAG.RetrieveRelevantChunks(_knowledgeChunks, userQuestion, count: 1);
+
+                    string finalUserQuery;
+                    if (relevantChunks.Any())
                     {
-                        // Use the new, smaller RAG context limit
+                        var contextBuilder = new StringBuilder();
+                        var chunk = relevantChunks.First();
+
+                        // Use the new, extremely small RAG context limit (50 chars)
                         string chunkContent = chunk.Content;
                         if (chunkContent.Length > _maxRAGContextChars)
                         {
-                            chunkContent = chunkContent.Substring(0, _maxRAGContextChars);
+                            chunkContent = chunkContent.Substring(0, _maxRAGContextChars) + "...";
                         }
                         contextBuilder.AppendLine(chunkContent);
                         contextBuilder.AppendLine("---");
+
+                        string contextText = contextBuilder.ToString().Trim();
+
+                        // PROMPT OPTIMIZATION: Inject RAG context
+                        finalUserQuery = $"CONTEXT: {contextText}\n\nUSER QUESTION: {userQuestion}";
+                    }
+                    else
+                    {
+                        finalUserQuery = userQuestion;
                     }
 
-                    string contextText = contextBuilder.ToString().Trim();
+                    // 2. Manually format full prompt (TinyLlama Chat template)
+                    var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
 
-                    // PROMPT OPTIMIZATION: Inject RAG context directly before the user question
-                    finalUserQuery = $"CONTEXT: {contextText}\n\nUSER QUESTION: {userQuestion}";
+                    // 3. Run the inference
+                    var result = new StringBuilder();
+                    await foreach (var text in executor.InferAsync(fullPrompt, inferenceParams))
+                    {
+                        result.Append(text);
+                    }
+
+                    return result.ToString().Trim();
                 }
-                else
+                catch (LLamaDecodeError ex)
                 {
-                    finalUserQuery = userQuestion;
+                    Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
+                    // This now means the prompt exceeds the tiny memory slot allocated (64 tokens approx).
+                    return "I ran into a context memory issue. The model cannot process a prompt of that length. Please try asking a single, very short question.";
                 }
-
-                // 2. Manually format full prompt (TinyLlama Chat template)
-                var fullPrompt = $"<|system|>{_systemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
-
-                // 3. Run the inference (InteractiveExecutor uses RunAsync/InferAsync in older versions)
-                // Use InferAsync, which is typically supported by both executor types for stateless prompts.
-                var result = new StringBuilder();
-                await foreach (var text in executor.InferAsync(fullPrompt, inferenceParams))
+                catch (Exception ex)
                 {
-                    result.Append(text);
+                    Console.WriteLine($"[ERROR] Unhandled exception in AskMegassis: {ex.GetType().Name}: {ex.Message}");
+                    Console.WriteLine(ex.ToString());
+
+                    return "A server error occurred while trying to generate the response.";
                 }
+            } // Context is automatically disposed here
 
-                return result.ToString().Trim();
-            }
-            catch (LLamaDecodeError ex)
-            {
-                Console.WriteLine($"[ERROR] LLama Decode Error (NoKvSlot): {ex.Message}");
-                // If this still fails, the prompt is too long even with minimized RAG.
-                return "I ran into a persistent context memory issue. The model's context is full. Please try asking a single, very short question.";
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[ERROR] Unhandled exception in AskMegassis: {ex.GetType().Name}: {ex.Message}");
-                Console.WriteLine(ex.ToString());
-
-                return "A server error occurred while trying to generate the response.";
-            }
-            finally
-            {
-                // We must dispose of the short-lived context created for this request.
-                // Executor disposal is not needed (as per v17 fix).
-                context?.Dispose();
-            }
         }
 
         // --- KnowledgeChunk definition and RAG helper class remain the same ---
