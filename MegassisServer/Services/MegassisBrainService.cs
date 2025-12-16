@@ -13,7 +13,8 @@ namespace MegassisServer.Services
 
         // --- Configuration Constants ---
         private const string OllamaEndpoint = "http://localhost:11434/api/generate";
-        private const string ModelName = "qwen:0.5b"; // Must match the model pulled in Ollama
+        // *** CRITICAL CHANGE: Upgrading to Llama 3 8B Instruct for OCI Deployment ***
+        private const string ModelName = "llama3:8b";
 
         // --- UPDATED SYSTEM PROMPT for Educational Walkthroughs ---
         private const string SystemPrompt = "You are Megassis, an educational AI assistant for KV Class 9 students, specializing in NEP 2020 and Viksit Bharat 2047. Your primary role is to guide students and provide walkthroughs, not direct answers. Use a patient, encouraging tone. Only use the provided 'CONTEXT: '. If the context has no answer, gently suggest where they might find more information (e.g., 'Check your official textbook'). Never give a direct solution or final answer. Focus on guiding principles and steps.";
@@ -23,8 +24,8 @@ namespace MegassisServer.Services
         public MegassisBrainService(HttpClient httpClient)
         {
             _httpClient = httpClient;
-            // Set a higher timeout for LLM responses
-            _httpClient.Timeout = TimeSpan.FromSeconds(120);
+            // Timeout set to 5 minutes (300s) for robust initial load on OCI.
+            _httpClient.Timeout = TimeSpan.FromSeconds(300);
 
             // Load Knowledge Base (RAG logic remains the same)
             var knowledgePath = Path.Combine(AppContext.BaseDirectory, "Data", "megassis_knowledge.json");
@@ -79,8 +80,9 @@ namespace MegassisServer.Services
                     finalUserQuery = userQuestion;
                 }
 
-                // 2. Format the prompt using the chat template (TinyLlama Chat Template)
-                var fullPrompt = $"<|system|>{SystemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
+                // 2. Format the prompt using the chat template (Llama 3 template)
+                // Llama 3 uses a specific system/user/assistant template.
+                var fullPrompt = $"<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{SystemPrompt}<|eot_id|><|start_header_id|>user<|end_header_id|>\n{finalUserQuery}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n";
 
                 // 3. Construct the JSON payload for Ollama
                 var requestBody = new
@@ -91,7 +93,8 @@ namespace MegassisServer.Services
                     options = new
                     {
                         temperature = 0.5,
-                        num_ctx = 512,
+                        // Increased context window is better for Llama 3
+                        num_ctx = 4096,
                         seed = 42
                     }
                 };
@@ -105,7 +108,7 @@ namespace MegassisServer.Services
                 {
                     var errorContent = await response.Content.ReadAsStringAsync();
                     Console.WriteLine($"[OLLAMA ERROR] Status: {response.StatusCode}. Response: {errorContent}");
-                    return $"Error communicating with the LLM service (Ollama). Status: {response.StatusCode}. Please ensure Ollama is running and the '{ModelName}' model is pulled.";
+                    return $"Ollama Error: Status {response.StatusCode}. Details: {errorContent.Trim()}";
                 }
 
                 // 5. Process the JSON response
@@ -117,12 +120,15 @@ namespace MegassisServer.Services
 
                 return answerElement.GetString()?.Trim() ?? "LLM returned an empty response.";
             }
-            catch (HttpRequestException)
+            catch (HttpRequestException ex)
             {
-                return $"Could not connect to Ollama at {OllamaEndpoint}. Please ensure Ollama is running (ollama.exe serve) and the network is accessible.";
+                // --- ENHANCED ERROR REPORTING ---
+                Console.WriteLine($"[OLLAMA CONNECTION ERROR] Could not connect to Ollama: {ex.Message}");
+                return $"ERROR: Could not connect to Ollama at {OllamaEndpoint}. Please ensure 'ollama.exe serve' is running in a separate terminal. Connection detail: {ex.Message}";
             }
             catch (Exception ex)
             {
+                // Catch any other errors (like JSON parsing issues after a long wait)
                 Console.WriteLine($"[ERROR] Unhandled exception in AskMegassis: {ex.GetType().Name}: {ex.Message}");
                 Console.WriteLine(ex.ToString());
 
