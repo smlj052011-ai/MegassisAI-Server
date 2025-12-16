@@ -12,10 +12,12 @@ namespace MegassisServer.Services
         private readonly IReadOnlyList<KnowledgeChunk> _knowledgeChunks;
 
         // --- Configuration Constants ---
-        // Make sure Ollama is running on this port
         private const string OllamaEndpoint = "http://localhost:11434/api/generate";
         private const string ModelName = "tinyllama"; // Must match the model pulled in Ollama
-        private const string SystemPrompt = "You are Megassis, a helpful AI. Only use the provided 'CONTEXT: '. If the context has no answer, state that you do not have information.";
+
+        // --- UPDATED SYSTEM PROMPT for Educational Walkthroughs ---
+        private const string SystemPrompt = "You are Megassis, an educational AI assistant for KV Class 9 students, specializing in NEP 2020 and Viksit Bharat 2047. Your primary role is to guide students and provide walkthroughs, not direct answers. Use a patient, encouraging tone. Only use the provided 'CONTEXT: '. If the context has no answer, gently suggest where they might find more information (e.g., 'Check your official textbook'). Never give a direct solution or final answer. Focus on guiding principles and steps.";
+
         private const int MaxRAGContextChars = 500;
 
         public MegassisBrainService(HttpClient httpClient)
@@ -39,7 +41,6 @@ namespace MegassisServer.Services
             }
         }
 
-        // InitializeAsync is now OBSOLETE, the model is loaded by Ollama.
         public Task InitializeAsync()
         {
             Console.WriteLine("[INFO] Initialization complete (Ollama dependency).");
@@ -71,14 +72,14 @@ namespace MegassisServer.Services
                         contextBuilder.AppendLine("---");
                     }
                     string contextText = contextBuilder.ToString().Trim();
-                    finalUserQuery = $"CONTEXT: {contextText}\n\nUSER QUESTION: {userQuestion}";
+                    finalUserQuery = $"CONTEXT: {contextText}\n\nSTUDENT QUESTION: {userQuestion}";
                 }
                 else
                 {
                     finalUserQuery = userQuestion;
                 }
 
-                // 2. Format the prompt using the chat template
+                // 2. Format the prompt using the chat template (TinyLlama Chat Template)
                 var fullPrompt = $"<|system|>{SystemPrompt}<|end|>\n<|user|>{finalUserQuery}<|end|>\n<|assistant|>";
 
                 // 3. Construct the JSON payload for Ollama
@@ -86,7 +87,7 @@ namespace MegassisServer.Services
                 {
                     model = ModelName,
                     prompt = fullPrompt,
-                    stream = false, // We use false for simplicity in an API response
+                    stream = false,
                     options = new
                     {
                         temperature = 0.5,
@@ -116,16 +117,20 @@ namespace MegassisServer.Services
 
                 return answerElement.GetString()?.Trim() ?? "LLM returned an empty response.";
             }
+            catch (HttpRequestException)
+            {
+                return $"Could not connect to Ollama at {OllamaEndpoint}. Please ensure Ollama is running (ollama.exe serve) and the network is accessible.";
+            }
             catch (Exception ex)
             {
                 Console.WriteLine($"[ERROR] Unhandled exception in AskMegassis: {ex.GetType().Name}: {ex.Message}");
                 Console.WriteLine(ex.ToString());
 
-                return "A server error occurred while processing the request. Check that Ollama is running.";
+                return "A server error occurred while processing the request.";
             }
         }
 
-        // --- Data Models and RAG Helper ---
+        // --- Data Models and RAG Helper (Unchanged) ---
 
         public class KnowledgeChunk
         {

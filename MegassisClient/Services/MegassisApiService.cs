@@ -11,40 +11,49 @@ namespace MegassisClient.Services
     public class MegassisApiService
     {
         // *** IMPORTANT ***
-        // REPLACE THIS URL with the actual Codespace Public URL after deployment.
-        // It will look something like: https://your-username-megassisa-xxxx.github.dev/api/chat
-        // During local testing, you can use: http://10.0.2.2:5000/api/chat
-        private const string BaseUrl = "https://reimagined-space-adventure-x57pq5v95wggc99jv-5087.app.github.dev/api/Chat";
+        // FOR LOCAL TESTING: Use the URL of the running ASP.NET Core server (MegassisServer).
+        // The endpoint is /api/Chat.
+
+        // Use HTTPS for Windows/Desktop if the server is running on HTTPS:
+        // When deploying, this will change to the OCI public URL.
+        private const string BaseUrl = "https://localhost:7123/api/Chat";
+
         private readonly HttpClient _httpClient;
 
         public MegassisApiService()
         {
             _httpClient = new HttpClient();
-            // Increased timeout for LLM inference
+            // Increased timeout for LLM inference (Ollama can take a moment)
             _httpClient.Timeout = TimeSpan.FromMinutes(2);
         }
 
         public async Task<string> GetAnswerAsync(string question)
         {
-            // ... (rest of the code is the same)
             try
             {
                 var json = JsonConvert.SerializeObject(new { Question = question });
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
 
+                // Post directly to the configured BaseUrl (which includes /api/Chat)
                 var response = await _httpClient.PostAsync(BaseUrl, content);
 
                 if (response.IsSuccessStatusCode)
                 {
                     var responseString = await response.Content.ReadAsStringAsync();
+
+                    // The server response structure is: { "Answer": "..." }
                     var result = JsonConvert.DeserializeObject<BotResponse>(responseString);
                     return result?.Answer ?? "No response.";
                 }
-                return "Error: Server not responding or API path is wrong.";
+
+                // Handle non-success status codes (400, 500, etc.)
+                var errorBody = await response.Content.ReadAsStringAsync();
+                return $"Server Error ({response.StatusCode}): API path or payload may be wrong. Details: {errorBody}";
             }
             catch (Exception ex)
             {
-                return $"Connection Error: Check the URL in MegassisApiService.cs. Detail: {ex.Message}";
+                // Catches network connection issues
+                return $"Connection Error: Could not reach the server at {BaseUrl}. Ensure the MegassisServer is running and Ollama is active. Detail: {ex.Message}";
             }
         }
     }
