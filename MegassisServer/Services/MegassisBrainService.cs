@@ -14,7 +14,7 @@ namespace MegassisServer.Services
         // --- Configuration Constants ---
         private const string OllamaEndpoint = "http://localhost:11434/api/generate";
         // *** CRITICAL CHANGE: Upgrading to Llama 3 8B Instruct for OCI Deployment ***
-        private const string ModelName = "llama3:8b";
+        private const string ModelName = "smollm:360m";
 
         // --- UPDATED SYSTEM PROMPT for Educational Walkthroughs ---
         private const string SystemPrompt = "You are Megassis, an educational AI assistant for KV Class 9 students, specializing in NEP 2020 and Viksit Bharat 2047. Your primary role is to guide students and provide walkthroughs, not direct answers. Use a patient, encouraging tone. Only use the provided 'CONTEXT: '. If the context has no answer, gently suggest where they might find more information (e.g., 'Check your official textbook'). Never give a direct solution or final answer. Focus on guiding principles and steps.";
